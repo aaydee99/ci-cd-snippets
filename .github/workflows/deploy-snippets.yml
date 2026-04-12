@@ -68,7 +68,7 @@ jobs:
           cat /tmp/token_check.json | python3 -m json.tool
 
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::API token verification failed — HTTP $HTTP_STATUS"
+            echo "::error::API token verification failed — HTTP $HTTP_STATUS. Check that CF_API_TOKEN is correct and has not expired."
             exit 1
           fi
 
@@ -80,41 +80,7 @@ jobs:
 
           echo "API token is valid ✓"
 
-      # ── 4. Pre-flight — verify zone ID is accessible ──────────────────
-      - name: Verify Zone ID
-        env:
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
-        run: |
-          echo "Verifying Zone ID against Cloudflare..."
-
-          HTTP_STATUS=$(curl -s -o /tmp/zone_check.json -w "%{http_code}" \
-            --request GET \
-            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}" \
-            --header "Authorization: Bearer ${CF_API_TOKEN}")
-
-          echo "HTTP status: $HTTP_STATUS"
-          cat /tmp/zone_check.json | python3 -m json.tool
-
-          if [ "$HTTP_STATUS" == "404" ]; then
-            echo "::error::Zone not found — CF_ZONE_ID may be wrong."
-            exit 1
-          fi
-
-          if [ "$HTTP_STATUS" == "403" ]; then
-            echo "::error::Access denied — token does not have permission for this zone."
-            exit 1
-          fi
-
-          if [ "$HTTP_STATUS" != "200" ]; then
-            echo "::error::Unexpected response — HTTP $HTTP_STATUS"
-            exit 1
-          fi
-
-          ZONE_NAME=$(jq -r '.result.name' /tmp/zone_check.json)
-          echo "Zone verified ✓  (zone name: ${ZONE_NAME})"
-
-      # ── 5. Validate rules file and all JS files exist ─────────────────
+      # ── 4. Validate rules file and all JS files exist ─────────────────
       - name: Validate rules file and JS files
         run: |
           RULES_FILE="$GITHUB_WORKSPACE/rules/snippet_rules.json"
@@ -135,7 +101,6 @@ jobs:
           echo ""
           echo "---"
 
-          # Validate it is parseable JSON with a rules array
           if ! jq empty "$RULES_FILE" 2>/dev/null; then
             echo "::error::rules/snippet_rules.json is not valid JSON"
             exit 1
@@ -147,11 +112,10 @@ jobs:
             exit 1
           fi
 
-          echo "Found $RULE_COUNT rule(s). Checking each snippet..."
+          echo "Found $RULE_COUNT rule(s). Checking each snippet JS file..."
 
           ERRORS=0
 
-          # Loop through every snippet_name in the rules array
           for SNIPPET_NAME in $(jq -r '.rules[].snippet_name' "$RULES_FILE"); do
             JS_FILE="$GITHUB_WORKSPACE/snippets/${SNIPPET_NAME}.js"
             if [ ! -f "$JS_FILE" ]; then
@@ -168,7 +132,7 @@ jobs:
 
           echo "Validation passed."
 
-      # ── 6. Upload each snippet JS file to Cloudflare ─────────────────
+      # ── 5. Upload each snippet JS file to Cloudflare ─────────────────
       # API: PUT /zones/{zone_id}/snippets/{snippet_name}
       - name: Upload all snippets
         env:
@@ -217,7 +181,7 @@ jobs:
             echo "'${SNIPPET_NAME}' uploaded successfully ✓"
           done
 
-      # ── 7. Push the full rules file to Cloudflare once ───────────────
+      # ── 6. Push the full rules file to Cloudflare once ───────────────
       # API: PUT /zones/{zone_id}/snippets/snippet_rules
       - name: Sync snippet rules
         env:
@@ -252,7 +216,7 @@ jobs:
 
           echo "Rules synced successfully ✓"
 
-      # ── 8. Verify every snippet is live on the zone ───────────────────
+      # ── 7. Verify every snippet is live on the zone ───────────────────
       - name: Verify all deployments
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

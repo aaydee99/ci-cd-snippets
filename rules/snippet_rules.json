@@ -17,6 +17,12 @@
         "expression": "(http.request.uri.path matches \"^/admin/\")",
         "enabled": true,
         "description": "Auth check on admin routes"
+      },
+      {
+        "snippet_name": "error_handler",
+        "expression": "(http.response.status >= 500)",
+        "enabled": true,
+        "description": "Handle error responses"
       }
     ]
   }
