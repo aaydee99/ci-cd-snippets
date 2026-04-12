@@ -20,7 +20,7 @@
       },
       {
         "snippet_name": "error_handler",
-        "expression": "(http.request.uri.path matches \"^/error/\")",
+        "expression": "(http.host eq \"aakhtar.online\")",
         "enabled": true,
         "description": "Handle error responses"
       }
