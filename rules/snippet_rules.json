@@ -20,7 +20,7 @@
       },
       {
         "snippet_name": "error_handler",
-        "expression": "(http.response.status >= 500)",
+        "expression": "(http.request.uri.path matches \"^/error/\")",
         "enabled": true,
         "description": "Handle error responses"
       }
