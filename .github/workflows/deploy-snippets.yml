@@ -8,70 +8,127 @@ jobs:
     name: Upload all snippets and sync rules
     runs-on: ubuntu-latest
 
+    # Set the working directory for every run step to the repo root
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
     steps:
 
-      # ── 1. Check out the repository code ─────────────────────────────
+      # ── 1. Checkout the repository ────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Parse rules file and validate everything before deploying ──
-      # Reads every snippet_name from rules/snippet_rules.json and
-      # checks that a matching .js file exists in snippets/
-      # Fails fast with a clear error before any API calls are made
+      # ── 2. Confirm the workspace and files are where we expect ────────
+      - name: Debug — show workspace structure
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo ""
+          echo "Repository root:"
+          ls -la "$GITHUB_WORKSPACE"
+          echo ""
+          echo "rules/ directory:"
+          ls -la "$GITHUB_WORKSPACE/rules/" || echo "rules/ directory not found"
+          echo ""
+          echo "snippets/ directory:"
+          ls -la "$GITHUB_WORKSPACE/snippets/" || echo "snippets/ directory not found"
+
+      # ── 3. Validate the rules file and all JS files exist ────────────
       - name: Validate rules file and JS files
         run: |
-          echo "Parsing rules/snippet_rules.json..."
+          RULES_FILE="$GITHUB_WORKSPACE/rules/snippet_rules.json"
 
-          python3 -c "
+          # Shell-level check before Python runs anything
+          if [ ! -f "$RULES_FILE" ]; then
+            echo "::error::rules/snippet_rules.json not found at $RULES_FILE"
+            exit 1
+          fi
+
+          if [ ! -s "$RULES_FILE" ]; then
+            echo "::error::rules/snippet_rules.json exists but is empty"
+            exit 1
+          fi
+
+          echo "Found rules file. Contents:"
+          echo "---"
+          cat "$RULES_FILE"
+          echo ""
+          echo "---"
+
+          # Write the validation script to a temp file to avoid quoting issues
+          cat > /tmp/validate.py << 'PYEOF'
           import json, sys, os
 
-          with open('rules/snippet_rules.json') as f:
-              rules = json.load(f)
+          rules_file = os.environ["RULES_FILE"]
 
-          if 'rules' not in rules or not isinstance(rules['rules'], list):
-              print('::error::rules/snippet_rules.json must have a top-level \"rules\" array')
+          with open(rules_file, "r") as f:
+              content = f.read().strip()
+
+          if not content:
+              print("::error::rules/snippet_rules.json is empty")
               sys.exit(1)
 
-          if len(rules['rules']) == 0:
-              print('::error::rules/snippet_rules.json has no rules defined')
+          try:
+              data = json.loads(content)
+          except json.JSONDecodeError as e:
+              print(f"::error::rules/snippet_rules.json is not valid JSON: {e}")
               sys.exit(1)
 
+          if "rules" not in data:
+              print("::error::rules/snippet_rules.json must have a top-level 'rules' key")
+              sys.exit(1)
+
+          if not isinstance(data["rules"], list):
+              print("::error::The 'rules' key must be an array")
+              sys.exit(1)
+
+          if len(data["rules"]) == 0:
+              print("::error::rules/snippet_rules.json has an empty rules array — nothing to deploy")
+              sys.exit(1)
+
+          workspace = os.environ["GITHUB_WORKSPACE"]
           errors = []
           names = []
-          for rule in rules['rules']:
-              name = rule.get('snippet_name')
+
+          for i, rule in enumerate(data["rules"]):
+              name = rule.get("snippet_name", "").strip()
               if not name:
-                  errors.append(f'A rule is missing snippet_name: {rule}')
+                  errors.append(f"Rule at index {i} is missing 'snippet_name'")
                   continue
+              if not rule.get("expression", "").strip():
+                  errors.append(f"Rule '{name}' is missing 'expression'")
               names.append(name)
-              js_file = f'snippets/{name}.js'
-              if not os.path.isfile(js_file):
-                  errors.append(f'Missing JS file: {js_file}')
+              js_path = os.path.join(workspace, "snippets", f"{name}.js")
+              if not os.path.isfile(js_path):
+                  errors.append(f"Missing JS file for '{name}': snippets/{name}.js")
 
           if errors:
               for e in errors:
-                  print(f'::error::{e}')
+                  print(f"::error::{e}")
               sys.exit(1)
 
-          print(f'Validation passed. Snippets to deploy: {names}')
-          "
+          print(f"Validation passed. Snippets to deploy: {names}")
+          PYEOF
 
-      # ── 3. Upload each snippet JS file to Cloudflare ─────────────────
-      # Reads every snippet_name from rules/snippet_rules.json
-      # Loops through and uploads each corresponding snippets/{name}.js
+          RULES_FILE="$RULES_FILE" python3 /tmp/validate.py
+
+      # ── 4. Upload each snippet JS file to Cloudflare ─────────────────
+      # Reads snippet names from rules/snippet_rules.json
+      # Uploads each snippets/{name}.js via multipart/form-data
       # API: PUT /zones/{zone_id}/snippets/{snippet_name}
-      # Uses multipart/form-data with the JS file and metadata field
       - name: Upload all snippets
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
         run: |
-          SNIPPET_NAMES=$(python3 -c "
-          import json
-          rules = json.load(open('rules/snippet_rules.json'))
-          print(' '.join(r['snippet_name'] for r in rules['rules']))
-          ")
+          # Extract snippet names from the rules file using Python
+          cat > /tmp/get_names.py << 'PYEOF'
+          import json, os
+          data = json.load(open(os.path.join(os.environ["GITHUB_WORKSPACE"], "rules", "snippet_rules.json")))
+          print(" ".join(r["snippet_name"] for r in data["rules"]))
+          PYEOF
 
+          SNIPPET_NAMES=$(python3 /tmp/get_names.py)
           echo "Snippets to upload: $SNIPPET_NAMES"
 
           for SNIPPET_NAME in $SNIPPET_NAMES; do
@@ -80,18 +137,21 @@ jobs:
             echo "Uploading: $SNIPPET_NAME"
             echo "======================================"
 
+            JS_FILE="$GITHUB_WORKSPACE/snippets/$SNIPPET_NAME.js"
+            echo "JS file path: $JS_FILE"
+
             HTTP_STATUS=$(curl -s -o /tmp/snippet_response.json -w "%{http_code}" \
               --request PUT \
-              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/snippets/$SNIPPET_NAME" \
-              --header "Authorization: Bearer $CF_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/snippets/${SNIPPET_NAME}" \
+              --header "Authorization: Bearer ${CF_API_TOKEN}" \
               --header "Content-Type: multipart/form-data" \
-              --form "files=@snippets/$SNIPPET_NAME.js;filename=$SNIPPET_NAME.js" \
-              --form "metadata={\"main_module\":\"$SNIPPET_NAME.js\"}")
+              --form "files=@${JS_FILE};filename=${SNIPPET_NAME}.js" \
+              --form "metadata={\"main_module\":\"${SNIPPET_NAME}.js\"}")
 
+            echo "HTTP status: $HTTP_STATUS"
             echo "--- Cloudflare API response ---"
             cat /tmp/snippet_response.json | python3 -m json.tool
             echo "-------------------------------"
-            echo "HTTP status: $HTTP_STATUS"
 
             if [ "$HTTP_STATUS" != "200" ]; then
               echo "::error::Failed to upload '$SNIPPET_NAME' — HTTP $HTTP_STATUS"
@@ -109,29 +169,29 @@ jobs:
             echo "'$SNIPPET_NAME' uploaded successfully."
           done
 
-      # ── 4. Push the full rules file to Cloudflare once ───────────────
+      # ── 5. Push the full rules file to Cloudflare once ───────────────
       # Runs once after all snippets are uploaded
-      # Sends the entire rules/snippet_rules.json to Cloudflare
-      # This replaces all existing snippet rules on the zone
+      # Replaces all existing snippet rules on the zone
       # API: PUT /zones/{zone_id}/snippets/snippet_rules
       - name: Sync snippet rules
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
         run: |
-          echo "Pushing rules/snippet_rules.json to Cloudflare..."
+          RULES_FILE="$GITHUB_WORKSPACE/rules/snippet_rules.json"
+          echo "Pushing $RULES_FILE to Cloudflare..."
 
           HTTP_STATUS=$(curl -s -o /tmp/rules_response.json -w "%{http_code}" \
             --request PUT \
-            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/snippets/snippet_rules" \
-            --header "Authorization: Bearer $CF_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/snippets/snippet_rules" \
+            --header "Authorization: Bearer ${CF_API_TOKEN}" \
             --header "Content-Type: application/json" \
-            --data @rules/snippet_rules.json)
+            --data "@${RULES_FILE}")
 
+          echo "HTTP status: $HTTP_STATUS"
           echo "--- Cloudflare API response ---"
           cat /tmp/rules_response.json | python3 -m json.tool
           echo "-------------------------------"
-          echo "HTTP status: $HTTP_STATUS"
 
           if [ "$HTTP_STATUS" != "200" ]; then
             echo "::error::Rules sync failed — HTTP $HTTP_STATUS"
@@ -148,20 +208,19 @@ jobs:
 
           echo "Rules synced successfully."
 
-      # ── 5. Verify every snippet is live on the zone ───────────────────
-      # Loops through every snippet_name from rules/snippet_rules.json
-      # and confirms each one exists on Cloudflare after deployment
+      # ── 6. Verify every snippet is live on the zone ───────────────────
       - name: Verify all deployments
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
         run: |
-          SNIPPET_NAMES=$(python3 -c "
-          import json
-          rules = json.load(open('rules/snippet_rules.json'))
-          print(' '.join(r['snippet_name'] for r in rules['rules']))
-          ")
+          cat > /tmp/get_names.py << 'PYEOF'
+          import json, os
+          data = json.load(open(os.path.join(os.environ["GITHUB_WORKSPACE"], "rules", "snippet_rules.json")))
+          print(" ".join(r["snippet_name"] for r in data["rules"]))
+          PYEOF
 
+          SNIPPET_NAMES=$(python3 /tmp/get_names.py)
           ALL_GOOD=true
 
           for SNIPPET_NAME in $SNIPPET_NAMES; do
@@ -171,11 +230,12 @@ jobs:
             echo "======================================"
 
             HTTP_STATUS=$(curl -s -o /tmp/verify_response.json -w "%{http_code}" \
-              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/snippets/$SNIPPET_NAME" \
-              --header "Authorization: Bearer $CF_API_TOKEN")
+              --request GET \
+              "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/snippets/${SNIPPET_NAME}" \
+              --header "Authorization: Bearer ${CF_API_TOKEN}")
 
-            cat /tmp/verify_response.json | python3 -m json.tool
             echo "HTTP status: $HTTP_STATUS"
+            cat /tmp/verify_response.json | python3 -m json.tool
 
             if [ "$HTTP_STATUS" != "200" ]; then
               echo "::error::Verification failed for '$SNIPPET_NAME' — HTTP $HTTP_STATUS"

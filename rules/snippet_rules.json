@@ -1,0 +1,22 @@
+{
+    "rules": [
+      {
+        "snippet_name": "my_api_snippet",
+        "expression": "(http.request.uri.path matches \"^/api/\")",
+        "enabled": true,
+        "description": "Run on all API requests"
+      },
+      {
+        "snippet_name": "redirect_handler",
+        "expression": "(http.request.uri.path matches \"^/old/\")",
+        "enabled": true,
+        "description": "Handle legacy redirects"
+      },
+      {
+        "snippet_name": "auth_check",
+        "expression": "(http.request.uri.path matches \"^/admin/\")",
+        "enabled": true,
+        "description": "Auth check on admin routes"
+      }
+    ]
+  }
