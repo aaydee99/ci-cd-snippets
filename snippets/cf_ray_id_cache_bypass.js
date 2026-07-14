@@ -29,7 +29,7 @@ export default {
           cacheEverything: false,
 
           // TTL of 0 — cached asset expires immediately.
-          cacheTtl: 0,
+          cacheTtl: -1,
 
           // Unique cache key per request — ?cf_ray=<unique-rayId> ensures
           // no two requests share a cache key, so CF always goes to origin.
